@@ -10,4 +10,4 @@ bin - скомпилированные игры
 mmoAPI.txt Ц кусок серверной части mmo игры дл€ gamesparks.com. язык JavaScript
 MMOLocation.ts Ц кусок серверной части, скрипт дл€ дл€ сессии реального времени в mmo игре на gamesparks.com. язык TypeScript (все в одном файле - это ограничение gamesparks.com)
 RTSFogOfWar.shader - шейдер тумана войны дл€ игр на Unity3d.
-
+WebApi.ts,ObjectModel.ts - пример TypeScript на веб сайте
