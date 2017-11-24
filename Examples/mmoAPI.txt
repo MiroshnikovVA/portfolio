@@ -1,0 +1,502 @@
+// Example:
+// require("MMOAPI");
+// var API = AGetCharactersAPI();
+// var rez = API.getlist(Spark.getPlayer().getPlayerId());
+
+
+function Player(playerId) {
+    
+    var MMOPlayer = {};
+    
+    MMOPlayer.PlayerId = playerId;
+    
+    //-----------DB Nnames------------- 
+    const playerDataCollectionName = "playerData";
+    //-----------init------------------
+    var data = Spark.runtimeCollection(playerDataCollectionName);
+    
+    MMOPlayer.SetCurrentCharacter = function SetCurrentCharacter(characterId) {
+        var char = GetCharactersAPI().getCharacter(characterId);
+        if (char == null) {
+            return false;
+        }
+        if (char.GetPlayerId() != MMOPlayer.PlayerId) {
+            return false;
+        }
+
+        return data.update({
+            PlayerId : MMOPlayer.PlayerId
+        }, 
+        {
+            $set : { SelectedCharacterId : characterId}
+        },
+        true, // Create the document if it does not exist (upsert)
+        false // This query will only affect a single object (multi)
+        );
+    }
+    
+    MMOPlayer.CurrentCharacterId = function CurrentCharacterId() {
+        var currentPlayer = data.findOne({
+            PlayerId : MMOPlayer.PlayerId
+        });
+        return currentPlayer.SelectedCharacterId;
+    }
+    
+    MMOPlayer.CurrentCharacter = function CurrentCharacter() {
+        var charApi = GetCharactersAPI();
+        var charId = MMOPlayer.CurrentCharacterId();
+        return charApi.getinfo(charId);
+    }
+    
+    return MMOPlayer;
+}
+
+function GetCharactersAPI() {
+    var This = {}; 
+    
+    {
+        //----------Config-----------
+        const maxCharactersForPlayer = 3;
+        //-----------DB Nnames------------- 
+        const characterDataCollectionName = "playerCharacters";
+        const removedCharacterDataCollectionName = "playerRemovedCharacters";
+        const characterClassDataCollectionName = "characterClassData";
+        const characterLogCollectionName = "charactersLog";
+        //-----------BD_FIELD_NAME---------
+        const PLAYER_ID      = "PlayerId";
+        const CHARACTER_NAME = "CharacterName";
+        const CHARACTER_VIEW = "CharacterView";
+        const CHARACTER_DATA = "CharacterData";
+        const CLASS_DB       = "CharacterClass";
+        //-----------OUTPUT FIELD----------
+        const IS_BAD_NAME     = "isBadName";
+        const NAME_TAKEN      = "nameIsAlreadyTaken";
+        const LIMIT_EXCEEDED  = "limitExceeded";
+        const ERROR           = "error";
+        //--------Error Message------------
+        const MES_LIMIT       = "Limit Exceeded characters";
+        const MES_NAME        = "bad name";
+        const MES_TAKEN       = "This name is already taken";
+        const MES_CLASS       = "Bad class. Using classes from DB " + characterClassDataCollectionName + ".meta";
+        const MES_ACTIONS     = "action is {add, select, getlist, getinfo, remove, restore}";
+        //-----------init------------------
+        var data = Spark.runtimeCollection(characterDataCollectionName);
+    }
+
+    function dic(key, value) {
+         var v = {};
+         v[key] = value;
+         return v;
+    };
+        
+    function dic2(key1, value1, key2, value2) {
+        var v = {};
+        v[key1] = value1;
+        v[key2] = value2;
+        return v;
+    };
+    
+    function fromId(id) {
+        return {"_id" : { "$oid" : id}};
+    };
+    
+    function dicId(id, key, value) {
+        return dic2("_id" , { $oid : id}, key , value);
+    };
+        
+    function onError(message) {
+        Spark.setScriptError(ERROR, message);  
+    }
+    
+    function AddCheking(playerId, characterName) {
+        var allCharactersFromPlayerCount = data.count(dic(PLAYER_ID, playerId));
+        if (allCharactersFromPlayerCount >= maxCharactersForPlayer) {
+            onError(MES_LIMIT);
+            Spark.setScriptError(LIMIT_EXCEEDED, true);
+            return false;
+        }
+        
+        if (!(/^[A-z ]+$/.test(characterName))) {
+            onError(MES_NAME);
+            Spark.setScriptError(IS_BAD_NAME, true);
+            return false;
+        }
+        var char = data.findOne(dic(CHARACTER_NAME, characterName));
+        if (char != null) {
+            onError(MES_TAKEN);
+            Spark.setScriptError(NAME_TAKEN, true);
+            return false;
+        }
+        return true;
+        //TODO: !!!!need characterView cheking!!!
+    }
+    
+    This.addFromData = function addFromDataf(playerId, newChar) {
+        
+        var characterName = newChar[CHARACTER_NAME];
+        
+        if (!AddCheking(playerId, characterName)) {
+            return null;
+        }
+        
+        data.save(newChar);
+        
+        //---cheking tranzaction--
+        var checkingChar = data.findOne(dic(CHARACTER_NAME, characterName));
+        if (checkingChar[PLAYER_ID] != playerId) {
+            //threading error:  race condition
+            data.remove(dic2(CHARACTER_NAME , characterName, PLAYER_ID , playerId));
+            onError(MES_TAKEN);
+            Spark.setScriptError(NAME_TAKEN, true);
+            return null;
+        }
+        //delete checkingChar._id;
+        return checkingChar;
+    }
+    
+    //public functions
+    This.add = function addf(playerId, characterName, characterClass, characterView) {
+        if (!AddCheking(playerId, characterName)) {
+            return null;
+        }
+        
+        var characterClasses = Spark.metaCollection(characterClassDataCollectionName);
+        var characterData = characterClasses.findOne(dic(CLASS_DB,characterClass));
+        if (characterData == null) {
+            onError(MES_CLASS);
+            Spark.setScriptError("availableClasses", This.getClasses());
+            return null;
+        }
+        delete characterData._id;
+        
+        var newChar = {};
+        newChar[CHARACTER_NAME] = characterName;
+        newChar[PLAYER_ID] = playerId;
+        newChar[CHARACTER_VIEW] = characterView;
+        newChar[CHARACTER_DATA] = characterData;
+        newChar["CreationDate"] = Date.now();
+        return This.addFromData(playerId, newChar);
+    };
+
+    This.getlist = function getlistf(playerId) {
+        var list = data.find(dic(PLAYER_ID, playerId));
+        return list;
+    };
+
+    This.getinfo = function getinfof(characterId) {
+        var c = data.findOne(fromId(characterId));
+        if (c == null) {
+            onError("Not found characterId : "+ characterId);
+            return null;
+        }
+        return c;
+    };
+    
+    This.saveCharacter = function saveCharacter(character) {
+        var _id = character._id;
+        data.update({_id : _id}, character);
+    }
+    
+    This.getCharacter = function getCharacterf(characterId) {
+        var c = This.getinfo(characterId);
+        if (c == null) {
+            return null;
+        }
+        return Character(c);
+    }
+
+    This.remove = function removef(playerId, characterId) {
+        var char = data.findAndRemove(dicId(characterId, PLAYER_ID, playerId));
+        if (char == null)
+             onError("Not found characterId : "+ characterId)
+        else {
+            var olddata =  Spark.runtimeCollection(removedCharacterDataCollectionName); 
+            olddata.save(char);
+            This.log("Removed", characterId);
+            olddata.update(fromId(characterId), {$set: {LastRemovedDate : Date.now()}},false, false);
+        }
+    };
+    
+    This.restore = function restoref(playerId, characterId) {
+        var olddata =  Spark.runtimeCollection(removedCharacterDataCollectionName); 
+        var restoredChar = olddata.findAndRemove(dicId(characterId, PLAYER_ID, playerId));
+        if (restoredChar == null) {
+            onError("Not found removed character " + characterId);
+            return null;
+        }
+        var newChar = This.addFromData(playerId, restoredChar);
+        if (newChar == null) {
+            olddata.save(restoredChar);
+            return null;
+        } 
+        else {
+            This.log("Restored", characterId);
+            data.update(fromId(characterId), {$set: {LastRestoredDate : Date.now()}},false, false);
+            return newChar;
+        }
+        
+    }
+
+    This.unknownAction = function notActionf() {
+        onError(MES_ACTIONS);
+    };
+    
+    This.getClasses = function getClasses() {
+        var characterClasses = Spark.metaCollection(characterClassDataCollectionName);
+        var rez = characterClasses.find({}, dic2(CLASS_DB, 1, "_id", 0));
+        return rez;
+    }
+    
+    This.log = function(logField, characterId) {
+        var logData = Spark.runtimeCollection(characterLogCollectionName);
+        logData.save(dic2(logField, Date.now(), "characterId", characterId));
+    }
+    
+    //----------OBJECTS-------------------
+    function Character(character) {
+        var This = {};
+        This.Data = character;
+        This.GetPlayerId = function GetPlayerId() {return This.Data[PLAYER_ID]; };
+        This.GetCharaterId = function GetCharaterId() {return This.Data._id.$oid; };
+        This.GetCharacterName = function GetCharacterName() {return This.Data[CHARACTER_NAME]; };
+        This.GetCharacterView = function GetCharacterView() {return This.Data[CHARACTER_VIEW]; };
+        This.GetCharacterData = function GetCharacterData() {return This.Data[CHARACTER_DATA]; };
+        This.GetCharacterClass = function GetCharacterClass() {return This.Data[CLASS_DB]; };
+        return This;
+    }
+    
+    return This;
+}
+
+function GetMatchAPI() {
+    var This = {}; 
+    
+    var matchesInfoList = Spark.runtimeCollection("matches");
+    var bookedMatches = Spark.runtimeCollection("bookedMatches");
+    
+    var maxPlayerCountInLocation = 3; // need get from LocationsDB
+    
+    var onError = function (message) {
+        Spark.setScriptError("Error", message);  
+    }
+    
+    var removeMatchFromBooked = function(bookedMatch) {
+        if (bookedMatch!=null) {
+            var info = matchesInfoList.findAndModify({
+                MatchId : bookedMatch.matchId
+            },
+            {
+                $inc: { Count : -1}    
+            });
+            if (info.Count <= 1) {
+                matchesInfoList.remove({MatchId : bookedMatch.matchId, Count : 0});
+            }
+            var match = Spark.getMultiplayer().loadMatch(bookedMatch.matchId);
+            if (match!=null) {
+                match.removePlayersById(playerId);
+            }
+        }
+    }
+    
+    This.removePlayerFromBookedMatch = function(playerId) {
+        var bookedMatch = bookedMatches.findAndRemove({playerId : playerId});
+        removeMatchFromBooked(bookedMatch);
+    }
+    
+    This.removePlayerFromMatch = function(matchId, playerId) {
+        var bookedMatch = bookedMatches.findAndRemove({playerId : playerId, matchId : matchId});
+        removeMatchFromBooked(bookedMatch);
+    }
+    
+    This.getMatchInfo = function(matchId) {
+        var d = matchesInfoList.findOne({MatchId : matchId});
+        var matchInfo = {};
+        matchInfo.MatchId = d.MatchId;
+        matchInfo.Location = d.Location;
+        matchInfo.Index = d.Index;
+        return matchInfo;
+    }
+    
+    var addPlayerToBookedMatch = function(matchId, playerId, index, location) {
+        var bookedMatch = bookedMatches.save(
+        {
+            playerId : playerId,
+            matchId : matchId,
+            name : location + "[" + index + "]",
+            online : false
+        });
+    }
+    
+    var findAvailableMatch = function(location, playerId) {
+        
+        //Need Party find!!!
+        
+        var matchesInfo = 
+        matchesInfoList.findAndModify({
+            //Count: { "$lt" : maxPlayerCountInLocation},
+            Count: { "$lt" : (maxPlayerCountInLocation)},
+            Location: location
+        },
+        {
+            $inc: { Count : 1}    
+        });
+        return matchesInfo;//.MatchId;
+    }
+    
+    var removeMatchFromDB = function(matchId) {
+        matchesInfoList.findAndRemove(
+        {
+            MatchId : matchId
+        });
+    }
+    
+    var addMatchFromDB = function(location, matchId) {
+        var index = GlobalState().getMathInstanceIndex(location);
+        matchesInfoList.save({
+            MatchId : matchId,
+            Count : 1,
+            Location : location,
+            Index : index
+        });
+        return index;
+    }
+    
+    var firstPlayerEnter = function(location, playerId) {
+        var testPlayerId = "57f22da96863b204ce4c0dcd";// GlobalState().getServerPlayerId(); //"57b28dfba30607048cb30a96";
+        var matchId = Spark.getMultiplayer().createMatchById(playerId, testPlayerId);
+        var match = Spark.getMultiplayer().loadMatch(matchId);
+        match.enableRealtime("MMOLocation");
+        match.removePlayersById(testPlayerId);
+        
+        var p = match.getParticipants();
+        for (var key in p) {
+            var v = p[key];
+            Spark.getLog().debug("new match from " + v.getPlayer().getDisplayName() + " id=" 
+                + v.getPlayer().getPlayerId() + " peer: " + v.getPeerId() + " token =" + v.getAccessToken() 
+                + "match = " + match.getId());
+        }
+        
+        var index = addMatchFromDB(location, matchId);
+        addPlayerToBookedMatch(matchId, playerId, index, location);
+        return match;
+    };
+    
+    var sendData = function(match, location, playerId) {
+        var participants = match.getParticipants();
+        var rez = false;
+        participants.forEach(function(participant) {
+            if (participant.getPlayer().getPlayerId() == playerId) {
+                Spark.setScriptData("accessToken", participant.getAccessToken());
+                Spark.setScriptData("host", match.getServer().getHost());
+                //Spark.setScriptData("matchId", match.getId());
+                Spark.setScriptData("peerId", participant.getPeerId());
+                Spark.setScriptData("port", match.getServer().getPort());
+                Spark.setScriptData("location", location);
+                location
+                rez = true;
+                return;
+            }
+        });
+        return rez;
+    };
+    
+    var findMatch = function(location, playerId) {
+        var matchesInfo = findAvailableMatch(location, playerId);
+        if (matchesInfo == null){
+            return firstPlayerEnter(location, playerId);
+        }
+        else
+        {
+            var matchId = matchesInfo.MatchId;
+            var match = Spark.getMultiplayer().loadMatch(matchId);
+            if (match == null) {
+                removeMatchFromDB(matchId);
+                return findMatch(location, playerId);
+            }
+            else {
+                addPlayerToBookedMatch(matchesInfo.MatchId, playerId, matchesInfo.Index, location);
+                match.addPlayersById(playerId);
+                return match;
+            }
+        }
+    }
+    
+    This.onPlayerConnectMatch = function(matchId, playerId) {
+        bookedMatches.update({playerId : playerId, matchId : matchId }, {$set: {online : true}});
+    }
+    
+    This.onPlayerDisconnectMatch = function(matchId, playerId) {
+        bookedMatches.update({playerId : playerId, matchId : matchId }, {$set: {online : false}});
+        //This.removePlayerFromMatch(matchId, playerId);
+    }
+    
+    This.removeOldMatches = function(){
+        matchesInfoList.remove({Count: 0});
+    }
+    
+    This.enterMatch = function(location, playerId) {
+        This.removePlayerFromBookedMatch(playerId);
+        var m = findMatch(location, playerId);
+        if (m == null) {
+            onError("Not found match");
+            return;
+        }
+        if (!sendData(m, location, playerId)) {
+            onError("Not found player in match");
+            Spark.setScriptError("Participants count:", m.getParticipants().length);
+            Spark.setScriptError("PlayerId", playerId);
+            //Spark.setScriptError("Host:", m.getServer().getHost());
+            //Spark.setScriptError("Port:", m.getServer().getPort());
+            Spark.setScriptError("MatchId:", m.getId());
+        }
+    }
+    
+    return This;
+}
+
+function GlobalState() {
+    
+    var This = {};
+
+    This.getMathInstanceIndex = function(location) {
+        var data = Spark.runtimeCollection("globalstate.matches");
+        return data.findAndModify({Location : location},{Index : 1},{},false, {$inc: { Index : 1}}, true, true).Index;
+    }
+    
+    This.getServerPlayerId = function() {
+        var data = Spark.runtimeCollection("globalstate.cfg");
+        var user = data.findOne({"key" : "ServerUser"});
+        return user.PlayerId;
+    }
+    
+    This.createServerPlayer = function() {
+
+        //Not support :(
+        //var req = Spark.sendRequestAs({
+        //    "@class": ".RegistrationRequest",
+        //    "displayName": "SpesServerUser",
+        //    "password": "3iIpKMXEk4T1g5W1",
+        //    "segments": {},
+        //    "userName": "SpesServerUser"
+        //});
+        //"57c95d019f0f9404a11853b9"
+        //var userId = req.userId;
+        //var data = Spark.runtimeCollection("globalstate.cfg");
+        //data.update(
+        //{
+        //    "key" : "ServerUser"
+        //}, 
+        //{
+        //    "$set" : {"PlayerId" : userId}
+        //}, 
+        //true, 
+        //false);
+        //return userId;
+    }
+
+    return This;
+}
+
+function SetupGame() {
+    GlobalState().createServerPlayer();
+}
